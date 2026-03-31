@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { MapPin, Phone, Car, AlertCircle, Navigation, Loader } from "lucide-react";
+import { MapPin, Phone, Car, AlertCircle, Navigation, Loader, Star } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,13 +8,12 @@ import MapComponent from "@/components/MapComponent";
 import { io, Socket } from "socket.io-client";
 
 interface ActiveRideData {
+  _id?: string;
   rideId: string;
   bookingId: string;
   driverId: string;
-  passengerId: string;
+  passengerId?: string;
   userType: "driver" | "passenger";
-  
-  // Driver info for passenger
   driverName?: string;
   driverEmail?: string;
   driverPhone?: string;
@@ -22,18 +21,16 @@ interface ActiveRideData {
   carModel?: string;
   carLicensePlate?: string;
   driverGender?: string;
-  
-  // Passenger info for driver
   passengerName?: string;
   passengerEmail?: string;
   passengerPhone?: string;
-  
-  // Ride details
   pickupLocation: string;
   dropoffLocation: string;
   date: string;
   time: string;
   seatsBooked?: number;
+  pricePerSeat?: number;
+  distanceTravelledInKm?: number;
   status: "active" | "in_progress" | "completed" | "cancelled";
 }
 
@@ -43,29 +40,48 @@ interface LocationData {
   timestamp: number;
 }
 
+interface PaymentSummary {
+  totalFare: number;
+  distance: number;
+  pricePerSeat: number;
+  seatsBooked: number;
+}
+
+type RideStage = "otp_pending" | "in_progress" | "completed" | "rating";
+
 export default function ActiveRide() {
   const { rideId } = useParams();
   const navigate = useNavigate();
   const socketRef = useRef<Socket | null>(null);
   const watchIdRef = useRef<number | null>(null);
-  
+
   const [rideData, setRideData] = useState<ActiveRideData | null>(null);
   const [userType, setUserType] = useState<"driver" | "passenger">("passenger");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   // Location tracking
   const [currentLocation, setCurrentLocation] = useState<LocationData | null>(null);
   const [otherLocation, setOtherLocation] = useState<LocationData | null>(null);
   const [trackingEnabled, setTrackingEnabled] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const [eta, setEta] = useState<string>("--");
 
-  // OTP and ride status
-  const [rideStatus, setRideStatus] = useState<'active' | 'in_progress' | 'completed' | 'cancelled'>('active');
-  const [otp, setOtp] = useState('');
+  // Ride stages
+  const [rideStage, setRideStage] = useState<RideStage>("otp_pending");
+  const [otp, setOtp] = useState("");
   const [otpVerified, setOtpVerified] = useState(false);
-  const [startingRide, setStartingRide] = useState(false);
+  const [otpError, setOtpError] = useState<string | null>(null);
   const [verifyingOtp, setVerifyingOtp] = useState(false);
+
+  // Payment
+  const [paymentSummary, setPaymentSummary] = useState<PaymentSummary | null>(null);
+  const [completingRide, setCompletingRide] = useState(false);
+
+  // Rating
+  const [driverRating, setDriverRating] = useState(0);
+  const [driverReview, setDriverReview] = useState("");
+  const [submittingRating, setSubmittingRating] = useState(false);
 
   // Fetch ride data
   useEffect(() => {
@@ -73,23 +89,22 @@ export default function ActiveRide() {
       try {
         setLoading(true);
         setError(null);
-        
+
         if (!rideId) {
           throw new Error("No ride ID provided");
         }
 
-        // Determine user type from localStorage or context
         const userType = (localStorage.getItem("userType") || "passenger") as "driver" | "passenger";
         setUserType(userType);
 
         const response = await fetch(`/api/rides/${rideId}`);
-        
+
         if (!response.ok) {
           throw new Error("Failed to fetch ride details");
         }
 
         const ride = await response.json();
-        
+
         // Enrich with booking details if available
         const bookingData = localStorage.getItem(`booking_${rideId}`);
         if (bookingData) {
@@ -98,17 +113,26 @@ export default function ActiveRide() {
           ride.passengerName = booking.passengerName;
           ride.passengerEmail = booking.passengerEmail;
           ride.passengerPhone = booking.passengerPhone;
+          if (booking.otp) {
+            setOtp(booking.otp);
+          }
         }
 
         ride.userType = userType;
+        ride.rideId = ride._id || rideId;
         setRideData(ride);
-        setRideStatus(ride.status || 'active');
-        
-        // If ride is in progress and user is passenger, check if OTP is verified
-        if (ride.status === 'in_progress' && userType === 'passenger') {
-          // Check if OTP was already verified (you might want to store this in localStorage or check with backend)
-          const verified = localStorage.getItem(`otp_verified_${rideId}`);
-          setOtpVerified(verified === 'true');
+
+        // Determine initial stage
+        if (ride.status === "in_progress") {
+          const verified = localStorage.getItem(`otp_verified_${rideId}`) === "true";
+          if (verified) {
+            setRideStage("in_progress");
+            setOtpVerified(true);
+          } else {
+            setRideStage("otp_pending");
+          }
+        } else if (ride.status === "completed") {
+          setRideStage("rating");
         }
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : "Unknown error occurred";
@@ -122,17 +146,14 @@ export default function ActiveRide() {
     fetchRideData();
   }, [rideId]);
 
-  // Initialize WebSocket connection and location tracking
+  // WebSocket connection
   useEffect(() => {
     if (!rideData) return;
 
-    // Initialize Socket.io connection
     socketRef.current = io();
 
     socketRef.current.on("connect", () => {
       console.log("✓ Connected to real-time service");
-      
-      // Join the ride room with user type
       socketRef.current?.emit("joinRide", {
         rideId: rideData.rideId,
         userType: rideData.userType,
@@ -140,21 +161,25 @@ export default function ActiveRide() {
       });
     });
 
-    // Listen for other user's location
+    socketRef.current.on("otpVerified", () => {
+      console.log("✓ OTP verified by driver");
+      setOtpVerified(true);
+      localStorage.setItem(`otp_verified_${rideId}`, "true");
+      setRideStage("in_progress");
+    });
+
     socketRef.current.on("driverLocation", (coords: LocationData) => {
-      console.log("📍 Driver location received:", coords);
       setOtherLocation(coords);
     });
 
     socketRef.current.on("passengerLocation", (coords: LocationData) => {
-      console.log("📍 Passenger location received:", coords);
       setOtherLocation(coords);
     });
 
-    socketRef.current.on("rideEnded", () => {
-      setTrackingEnabled(false);
-      alert("Ride has ended");
-      navigate("/dashboard");
+    socketRef.current.on("rideCompleted", (data: any) => {
+      console.log("✓ Ride completed by driver");
+      setPaymentSummary(data.payment);
+      setRideStage("rating");
     });
 
     socketRef.current.on("error", (error: string) => {
@@ -165,13 +190,12 @@ export default function ActiveRide() {
     return () => {
       socketRef.current?.disconnect();
     };
-  }, [rideData, navigate]);
+  }, [rideData, rideId]);
 
   // Geolocation tracking
   useEffect(() => {
     if (!trackingEnabled || !rideData || !socketRef.current) return;
 
-    // Check if browser supports geolocation
     if (!navigator.geolocation) {
       setLocationError("Geolocation is not supported by this browser");
       setTrackingEnabled(false);
@@ -179,7 +203,6 @@ export default function ActiveRide() {
     }
 
     const startTracking = () => {
-      // Start watching position
       watchIdRef.current = navigator.geolocation.watchPosition(
         (position) => {
           const { latitude, longitude } = position.coords;
@@ -192,7 +215,6 @@ export default function ActiveRide() {
           setCurrentLocation(locationData);
           setLocationError(null);
 
-          // Emit location to other user via WebSocket
           socketRef.current?.emit("locationUpdate", {
             rideId: rideData.rideId,
             userType: rideData.userType,
@@ -202,7 +224,7 @@ export default function ActiveRide() {
         (error) => {
           console.error("Geolocation error:", error);
           let errorMsg = "Unable to get location";
-          
+
           if (error.code === error.PERMISSION_DENIED) {
             errorMsg = "Location permission denied. Please enable it in settings.";
           } else if (error.code === error.POSITION_UNAVAILABLE) {
@@ -210,7 +232,7 @@ export default function ActiveRide() {
           } else if (error.code === error.TIMEOUT) {
             errorMsg = "Location request timed out.";
           }
-          
+
           setLocationError(errorMsg);
         },
         {
@@ -230,74 +252,64 @@ export default function ActiveRide() {
     };
   }, [trackingEnabled, rideData]);
 
-  const handleStartTracking = () => {
-    if (!navigator.geolocation) {
-      setLocationError("Geolocation not supported");
-      return;
-    }
-    setTrackingEnabled(true);
-    setLocationError(null);
-  };
+  // Calculate ETA based on distance
+  const calculateEta = () => {
+    if (!currentLocation || !otherLocation) return;
 
-  const handleStopTracking = () => {
-    setTrackingEnabled(false);
-    if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-    }
-  };
+    const distanceInKm = getDistanceFromLatLng(
+      currentLocation.lat,
+      currentLocation.lng,
+      otherLocation.lat,
+      otherLocation.lng
+    );
 
-  const handleCompleteRide = async () => {
-    try {
-      const response = await fetch(`/api/rides/${rideId}/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          driverId: rideData?.driverId,
-        }),
-      });
+    // Assume average speed of 40 km/h in city
+    const avgSpeed = 40;
+    const timeInHours = distanceInKm / avgSpeed;
+    const timeInMinutes = Math.round(timeInHours * 60);
 
-      if (!response.ok) {
-        throw new Error("Failed to complete ride");
-      }
-
-      alert("Ride completed successfully!");
-      handleStopTracking();
-      navigate("/dashboard");
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to complete ride");
+    if (timeInMinutes < 1) {
+      setEta("Arriving soon");
+    } else if (timeInMinutes === 1) {
+      setEta("1 minute");
+    } else {
+      setEta(`${timeInMinutes} minutes`);
     }
   };
 
-  const handleStartRide = async () => {
-    if (!rideId) return;
-    
-    try {
-      setStartingRide(true);
-      const response = await fetch(`/api/rides/${rideId}/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-
-      if (!response.ok) {
-        throw new Error("Failed to start ride");
-      }
-
-      const data = await response.json();
-      setRideStatus('in_progress');
-      alert(`Ride started! OTP: ${data.otp}`);
-    } catch (error) {
-      console.error("Error starting ride:", error);
-      alert("Failed to start ride. Please try again.");
-    } finally {
-      setStartingRide(false);
-    }
+  const getDistanceFromLatLng = (lat1: number, lng1: number, lat2: number, lng2: number) => {
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLng = ((lng2 - lng1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLng / 2) *
+        Math.sin(dLng / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
   };
+
+  useEffect(() => {
+    calculateEta();
+  }, [currentLocation, otherLocation]);
 
   const handleVerifyOtp = async () => {
-    if (!rideId || !otp) return;
-    
+    if (!rideId || !otp) {
+      setOtpError("Please enter OTP");
+      return;
+    }
+
+    if (otp.length !== 4) {
+      setOtpError("OTP must be 4 digits");
+      return;
+    }
+
     try {
       setVerifyingOtp(true);
+      setOtpError(null);
+
       const response = await fetch(`/api/rides/${rideId}/verify-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -312,14 +324,123 @@ export default function ActiveRide() {
       const data = await response.json();
       if (data.verified) {
         setOtpVerified(true);
-        localStorage.setItem(`otp_verified_${rideId}`, 'true');
-        alert("OTP verified! Ride has started.");
+        localStorage.setItem(`otp_verified_${rideId}`, "true");
+        setRideStage("in_progress");
+
+        // Notify other user
+        socketRef.current?.emit("otpVerified", { rideId });
       }
     } catch (error) {
-      console.error("Error verifying OTP:", error);
-      alert(error instanceof Error ? error.message : "Failed to verify OTP. Please try again.");
+      setOtpError(error instanceof Error ? error.message : "Failed to verify OTP");
     } finally {
       setVerifyingOtp(false);
+    }
+  };
+
+  const handleCompleteRide = async () => {
+    if (!rideId) return;
+
+    try {
+      setCompletingRide(true);
+
+      const response = await fetch(`/api/rides/${rideId}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          driverId: rideData?.driverId,
+          distance: rideData?.distanceTravelledInKm,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to complete ride");
+      }
+
+      const data = await response.json();
+
+      // Calculate payment
+      const totalFare = data.totalFare || (rideData?.seatsBooked || 1) * (rideData?.pricePerSeat || 0);
+      setPaymentSummary({
+        totalFare,
+        distance: rideData?.distanceTravelledInKm || 0,
+        pricePerSeat: rideData?.pricePerSeat || 0,
+        seatsBooked: rideData?.seatsBooked || 1,
+      });
+
+      setRideStage("rating");
+
+      // Notify other user
+      socketRef.current?.emit("rideCompleted", {
+        rideId,
+        payment: {
+          totalFare,
+          distance: rideData?.distanceTravelledInKm || 0,
+          pricePerSeat: rideData?.pricePerSeat || 0,
+          seatsBooked: rideData?.seatsBooked || 1,
+        },
+      });
+    } catch (error) {
+      console.error("Error completing ride:", error);
+      alert(error instanceof Error ? error.message : "Failed to complete ride");
+    } finally {
+      setCompletingRide(false);
+    }
+  };
+
+  const handleSubmitRating = async () => {
+    if (driverRating === 0) {
+      alert("Please select a rating");
+      return;
+    }
+
+    try {
+      setSubmittingRating(true);
+
+      // Save ride to history and get the ride history ID
+      const rideHistoryResponse = await fetch(`/api/rides/${rideId}/history`);
+      if (!rideHistoryResponse.ok) {
+        throw new Error("Failed to get ride history");
+      }
+
+      const historyData = await rideHistoryResponse.json();
+
+      const response = await fetch(`/api/rides/history/${historyData.rideHistoryId}/rate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          passengerId: userType === "passenger" ? rideData?.driverId : rideData?.passengerId,
+          rating: driverRating,
+          review: driverReview,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to submit rating");
+      }
+
+      alert("Rating submitted successfully!");
+      navigate("/dashboard");
+    } catch (error) {
+      console.error("Error submitting rating:", error);
+      alert(error instanceof Error ? error.message : "Failed to submit rating");
+    } finally {
+      setSubmittingRating(false);
+    }
+  };
+
+  const handleStartTracking = () => {
+    if (!navigator.geolocation) {
+      setLocationError("Geolocation not supported");
+      return;
+    }
+    setTrackingEnabled(true);
+    setLocationError(null);
+  };
+
+  const handleStopTracking = () => {
+    setTrackingEnabled(false);
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
     }
   };
 
@@ -363,291 +484,353 @@ export default function ActiveRide() {
         {/* Header */}
         <div className="mb-6">
           <h1 className="text-4xl font-bold text-gray-800 mb-2">Active Ride</h1>
-          <p className="text-gray-600">Real-time tracking • Live GPS updates</p>
+          <p className="text-gray-600">
+            {rideStage === "otp_pending" && "OTP Verification Required"}
+            {rideStage === "in_progress" && "Real-time tracking • Live GPS updates"}
+            {rideStage === "rating" && "Rate your ride experience"}
+          </p>
         </div>
 
         {/* Status Badge */}
         <div className="mb-6">
-          <Badge className={`px-4 py-2 text-base ${
-            rideStatus === 'in_progress' 
-              ? 'bg-blue-500 text-white' 
-              : rideStatus === 'completed'
-              ? 'bg-gray-500 text-white'
-              : 'bg-green-500 text-white'
-          }`}>
-            {rideStatus === 'in_progress' 
-              ? '🚗 Ride In Progress' 
-              : rideStatus === 'completed'
-              ? '✅ Ride Completed'
-              : '✓ Ride Active • Ready to Start'
-            }
+          <Badge
+            className={`px-4 py-2 text-base ${
+              rideStage === "otp_pending"
+                ? "bg-orange-500 text-white"
+                : rideStage === "in_progress"
+                ? "bg-blue-500 text-white"
+                : "bg-green-500 text-white"
+            }`}
+          >
+            {rideStage === "otp_pending" && "🔐 Waiting for OTP Verification"}
+            {rideStage === "in_progress" && "🚗 Ride In Progress"}
+            {rideStage === "rating" && "⭐ Please Rate Your Ride"}
           </Badge>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Map Section - Takes 2 columns on large screens */}
-          <div className="lg:col-span-2">
-            <Card className="h-full">
+        {/* OTP VERIFICATION STAGE */}
+        {rideStage === "otp_pending" && (
+          <div className="max-w-2xl mx-auto">
+            <Card className="border-2 border-orange-300">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Navigation className="h-5 w-5" />
-                  Live Map Tracking
-                </CardTitle>
+                <CardTitle className="text-center text-2xl">🔐 Verify Ride Start</CardTitle>
               </CardHeader>
-              <CardContent>
-                {/* Map Component */}
-                <div className="rounded-lg overflow-hidden mb-4">
-                  <MapComponent
-                    pickup={rideData.pickupLocation}
-                    dropoff={rideData.dropoffLocation}
-                    height="h-96"
-                    currentLocation={currentLocation}
-                    otherLocation={otherLocation}
-                    userType={rideData.userType}
-                  />
-                </div>
-
-                {/* Location Status */}
-                <div className="space-y-2">
-                  {locationError && (
-                    <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
-                      ⚠️ {locationError}
-                    </div>
-                  )}
-
-                  {currentLocation && (
-                    <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm">
-                      <p className="text-blue-900">
-                        📍 Your Location: {currentLocation.lat.toFixed(5)}, {currentLocation.lng.toFixed(5)}
+              <CardContent className="space-y-6">
+                <div className="text-center">
+                  {userType === "driver" ? (
+                    <div>
+                      <p className="text-gray-700 mb-4">
+                        Share this 4-digit PIN with {rideData.passengerName}
+                      </p>
+                      <div className="bg-orange-100 rounded-lg p-8 inline-block">
+                        <p className="text-6xl font-bold text-orange-600 tracking-widest font-mono">
+                          {otp || "----"}
+                        </p>
+                      </div>
+                      <p className="text-sm text-gray-600 mt-4">
+                        Waiting for passenger to verify...
                       </p>
                     </div>
-                  )}
-
-                  {otherLocation && (
-                    <div className="bg-purple-50 border border-purple-200 rounded p-3 text-sm">
-                      <p className="text-purple-900">
-                        🚗 {rideData.userType === "driver" ? "Passenger" : "Driver"} Location: {otherLocation.lat.toFixed(5)}, {otherLocation.lng.toFixed(5)}
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Tracking Controls */}
-                <div className="flex gap-3 mt-6">
-                  {!trackingEnabled ? (
-                    <Button
-                      onClick={handleStartTracking}
-                      className="flex-1 bg-green-600 hover:bg-green-700"
-                    >
-                      <Navigation className="h-4 w-4 mr-2" />
-                      Start Live Tracking
-                    </Button>
                   ) : (
-                    <Button
-                      onClick={handleStopTracking}
-                      className="flex-1 bg-red-600 hover:bg-red-700"
-                    >
-                      Stop Tracking
-                    </Button>
-                  )}
+                    <div>
+                      <p className="text-gray-700 mb-6">Enter the 4-digit PIN from your driver</p>
+                      <div className="flex gap-2 justify-center mb-6">
+                        <input
+                          type="text"
+                          value={otp}
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/\D/g, "").slice(0, 4);
+                            setOtp(val);
+                            if (otpError) setOtpError(null);
+                          }}
+                          placeholder="0000"
+                          maxLength={4}
+                          className="w-32 text-4xl text-center font-bold border-2 border-orange-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-orange-500 tracking-widest font-mono"
+                        />
+                      </div>
 
-                  {rideData.userType === "driver" && rideStatus === 'active' && (
-                    <Button
-                      onClick={handleStartRide}
-                      disabled={startingRide}
-                      className="flex-1 bg-green-600 hover:bg-green-700"
-                    >
-                      {startingRide ? 'Starting...' : 'Start Ride'}
-                    </Button>
-                  )}
+                      {otpError && (
+                        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-red-700 mb-4">
+                          ❌ {otpError}
+                        </div>
+                      )}
 
-                  {rideData.userType === "driver" && rideStatus === 'in_progress' && (
-                    <Button
-                      onClick={handleCompleteRide}
-                      className="flex-1 bg-blue-600 hover:bg-blue-700"
-                    >
-                      Complete Ride
-                    </Button>
+                      <Button
+                        onClick={handleVerifyOtp}
+                        disabled={verifyingOtp || otp.length !== 4}
+                        className="w-full bg-orange-600 hover:bg-orange-700 text-lg py-6"
+                      >
+                        {verifyingOtp ? "Verifying..." : "Verify PIN"}
+                      </Button>
+                    </div>
                   )}
+                </div>
+
+                {/* Ride Details */}
+                <div className="border-t pt-6 grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-sm text-gray-600">Pickup</p>
+                    <p className="font-semibold">{rideData.pickupLocation}</p>
+                  </div>
+                  <div>
+                    <p className="text-sm text-gray-600">Dropoff</p>
+                    <p className="font-semibold">{rideData.dropoffLocation}</p>
+                  </div>
                 </div>
               </CardContent>
             </Card>
           </div>
+        )}
 
-          {/* Details Section */}
-          <div className="space-y-6">
-            {/* Route Info */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Route Details</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <p className="text-sm text-gray-500 mb-1">📍 Pickup</p>
-                  <p className="font-semibold text-gray-900">{rideData.pickupLocation}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500 mb-1">📍 Dropoff</p>
-                  <p className="font-semibold text-gray-900">{rideData.dropoffLocation}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-500 mb-1">📅 Date & Time</p>
-                  <p className="font-semibold text-gray-900">
-                    {rideData.date} at {rideData.time}
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Display relevant info based on user type */}
-            {rideData.userType === "passenger" ? (
-              // Passenger View - Show Driver Info
-              <Card className="border-2 border-green-200 bg-green-50">
+        {/* IN-PROGRESS STAGE */}
+        {rideStage === "in_progress" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Map Section */}
+            <div className="lg:col-span-2">
+              <Card className="h-full">
                 <CardHeader>
-                  <CardTitle className="text-lg text-green-900 flex items-center gap-2">
-                    <Car className="h-5 w-5" />
-                    Driver Information
+                  <CardTitle className="flex items-center justify-between">
+                    <span className="flex items-center gap-2">
+                      <Navigation className="h-5 w-5" />
+                      Live Route Tracking
+                    </span>
+                    <Badge className="bg-blue-100 text-blue-800">ETA: {eta}</Badge>
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  {/* Map */}
+                  <div className="rounded-lg overflow-hidden">
+                    <MapComponent
+                      pickup={rideData.pickupLocation}
+                      dropoff={rideData.dropoffLocation}
+                      height="h-96"
+                      currentLocation={currentLocation}
+                      otherLocation={otherLocation}
+                      userType={rideData.userType}
+                    />
+                  </div>
+
+                  {/* Location Info */}
+                  <div className="space-y-2">
+                    {locationError && (
+                      <div className="bg-red-50 border border-red-200 rounded p-3 text-sm text-red-700">
+                        ⚠️ {locationError}
+                      </div>
+                    )}
+
+                    {currentLocation && (
+                      <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm">
+                        <p className="text-blue-900">
+                          📍 Your Location: {currentLocation.lat.toFixed(4)}, {currentLocation.lng.toFixed(4)}
+                        </p>
+                      </div>
+                    )}
+
+                    {otherLocation && (
+                      <div className="bg-purple-50 border border-purple-200 rounded p-3 text-sm">
+                        <p className="text-purple-900">
+                          🚗 {rideData.userType === "driver" ? "Passenger" : "Driver"}: {otherLocation.lat.toFixed(4)}, {otherLocation.lng.toFixed(4)}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Controls */}
+                  <div className="flex gap-3">
+                    {!trackingEnabled ? (
+                      <Button onClick={handleStartTracking} className="flex-1 bg-green-600 hover:bg-green-700">
+                        <Navigation className="h-4 w-4 mr-2" />
+                        Start Live Tracking
+                      </Button>
+                    ) : (
+                      <Button onClick={handleStopTracking} className="flex-1 bg-red-600 hover:bg-red-700">
+                        Stop Tracking
+                      </Button>
+                    )}
+
+                    {userType === "driver" && (
+                      <Button onClick={handleCompleteRide} disabled={completingRide} className="flex-1 bg-blue-600 hover:bg-blue-700">
+                        {completingRide ? "Completing..." : "✓ Complete Ride"}
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Details Panel */}
+            <div className="space-y-6">
+              {/* Route Info */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Route</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
                   <div>
-                    <p className="text-sm text-gray-600 mb-1">Name</p>
-                    <p className="font-bold text-lg text-gray-900">{rideData.driverName}</p>
+                    <p className="text-xs text-gray-500 uppercase">From</p>
+                    <p className="font-semibold">{rideData.pickupLocation}</p>
                   </div>
                   <div>
-                    <p className="text-sm text-gray-600 mb-1">Vehicle</p>
-                    <p className="font-semibold text-gray-900">
-                      {rideData.carBrand} {rideData.carModel}
-                    </p>
+                    <p className="text-xs text-gray-500 uppercase">To</p>
+                    <p className="font-semibold">{rideData.dropoffLocation}</p>
                   </div>
-                  {rideData.carLicensePlate && (
+                  <div>
+                    <p className="text-xs text-gray-500 uppercase">Time</p>
+                    <p className="font-semibold">{rideData.date} at {rideData.time}</p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Other User Info */}
+              {userType === "passenger" ? (
+                <Card className="border-2 border-green-200 bg-green-50">
+                  <CardHeader>
+                    <CardTitle className="text-lg text-green-900 flex items-center gap-2">
+                      <Car className="h-5 w-5" />
+                      Driver
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">License Plate</p>
-                      <p className="font-mono text-lg font-bold text-blue-600">
-                        {rideData.carLicensePlate}
-                      </p>
+                      <p className="text-sm text-gray-600">Name</p>
+                      <p className="font-bold">{rideData.driverName}</p>
                     </div>
-                  )}
-                  <div className="pt-4 border-t border-green-200">
-                    <p className="text-sm text-gray-600 mb-2">Contact</p>
+                    <div>
+                      <p className="text-sm text-gray-600">Vehicle</p>
+                      <p className="font-semibold">
+                        {rideData.carBrand} {rideData.carModel}
+                      </p>
+                      {rideData.carLicensePlate && (
+                        <p className="font-mono text-sm text-blue-600">{rideData.carLicensePlate}</p>
+                      )}
+                    </div>
                     <a
                       href={`tel:${rideData.driverPhone}`}
-                      className="flex items-center gap-2 p-3 bg-white rounded-lg hover:bg-blue-100 transition"
+                      className="block p-2 bg-white rounded hover:bg-gray-100 text-center font-semibold text-blue-600"
                     >
-                      <Phone className="h-5 w-5 text-blue-600" />
-                      <span className="font-semibold text-blue-600">{rideData.driverPhone || "N/A"}</span>
+                      <Phone className="h-4 w-4 inline mr-1" />
+                      Call Driver
                     </a>
-                    <a
-                      href={`mailto:${rideData.driverEmail}`}
-                      className="flex items-center gap-2 p-3 bg-white rounded-lg hover:bg-blue-100 transition mt-2 text-sm"
-                    >
-                      {rideData.driverEmail}
-                    </a>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : (
-              // Driver View - Show Passenger Info
-              <Card className="border-2 border-blue-200 bg-blue-50">
-                <CardHeader>
-                  <CardTitle className="text-lg text-blue-900">Passenger Information</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div>
-                    <p className="text-sm text-gray-600 mb-1">Name</p>
-                    <p className="font-bold text-lg text-gray-900">{rideData.passengerName}</p>
-                  </div>
-                  {rideData.seatsBooked && (
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card className="border-2 border-blue-200 bg-blue-50">
+                  <CardHeader>
+                    <CardTitle className="text-lg text-blue-900">Passenger</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
                     <div>
-                      <p className="text-sm text-gray-600 mb-1">Seats Booked</p>
-                      <p className="font-semibold text-gray-900">{rideData.seatsBooked}</p>
+                      <p className="text-sm text-gray-600">Name</p>
+                      <p className="font-bold">{rideData.passengerName}</p>
                     </div>
-                  )}
-                  <div className="pt-4 border-t border-blue-200">
-                    <p className="text-sm text-gray-600 mb-2">Contact</p>
+                    <div>
+                      <p className="text-sm text-gray-600">Seats</p>
+                      <p className="font-semibold">{rideData.seatsBooked}</p>
+                    </div>
                     <a
                       href={`tel:${rideData.passengerPhone}`}
-                      className="flex items-center gap-2 p-3 bg-white rounded-lg hover:bg-green-100 transition"
+                      className="block p-2 bg-white rounded hover:bg-gray-100 text-center font-semibold text-green-600"
                     >
-                      <Phone className="h-5 w-5 text-green-600" />
-                      <span className="font-semibold text-green-600">{rideData.passengerPhone || "N/A"}</span>
+                      <Phone className="h-4 w-4 inline mr-1" />
+                      Call Passenger
                     </a>
-                    <a
-                      href={`mailto:${rideData.passengerEmail}`}
-                      className="flex items-center gap-2 p-3 bg-white rounded-lg hover:bg-green-100 transition mt-2 text-sm"
-                    >
-                      {rideData.passengerEmail}
-                    </a>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </div>
+        )}
 
-            {/* OTP Verification for Passengers */}
-            {rideData.userType === "passenger" && rideStatus === 'in_progress' && !otpVerified && (
-              <Card className="border-2 border-orange-200 bg-orange-50">
-                <CardHeader>
-                  <CardTitle className="text-lg text-orange-900 flex items-center gap-2">
-                    🔐 Verify Ride Start
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <p className="text-sm text-orange-800">
-                    The driver has started the ride. Please enter the 4-digit OTP shared by your driver to verify and begin tracking.
-                  </p>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={otp}
-                      onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                      placeholder="Enter 4-digit OTP"
-                      className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
-                      maxLength={4}
-                    />
-                    <Button
-                      onClick={handleVerifyOtp}
-                      disabled={verifyingOtp || otp.length !== 4}
-                      className="bg-orange-600 hover:bg-orange-700"
-                    >
-                      {verifyingOtp ? 'Verifying...' : 'Verify'}
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Ride Started Confirmation for Passengers */}
-            {rideData.userType === "passenger" && rideStatus === 'in_progress' && otpVerified && (
-              <Card className="border-2 border-green-200 bg-green-50">
-                <CardHeader>
-                  <CardTitle className="text-lg text-green-900 flex items-center gap-2">
-                    ✅ Ride Started
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-sm text-green-800">
-                    OTP verified! The ride has started and tracking is now active.
-                  </p>
-                </CardContent>
-              </Card>
-            )}
-
-            {/* Emergency Info */}
-            <Card className="border-yellow-200 bg-yellow-50">
+        {/* PAYMENT SUMMARY STAGE */}
+        {rideStage === "rating" && paymentSummary && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Payment Summary */}
+            <Card className="border-2 border-green-300">
               <CardHeader>
-                <CardTitle className="text-lg text-yellow-900">💡 Tips</CardTitle>
+                <CardTitle className="text-center text-2xl">💰 Payment Summary</CardTitle>
               </CardHeader>
-              <CardContent className="text-sm text-yellow-800">
-                <ul className="space-y-2 list-disc list-inside">
-                  <li>Enable tracking to share live location</li>
-                  <li>Keep your phone connected to the internet</li>
-                  <li>Share important emergency contacts if needed</li>
-                  <li>Driver completes the ride when destination is reached</li>
-                </ul>
+              <CardContent className="space-y-4">
+                <div className="bg-green-50 rounded-lg p-4 space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-700">Price per seat</span>
+                    <span className="font-semibold">₹{paymentSummary.pricePerSeat}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-700">Seats booked</span>
+                    <span className="font-semibold">×{paymentSummary.seatsBooked}</span>
+                  </div>
+                  <div className="border-t border-green-200 pt-3 flex justify-between text-lg font-bold">
+                    <span>Total Fare</span>
+                    <span className="text-green-600">₹{paymentSummary.totalFare}</span>
+                  </div>
+                </div>
+
+                <div className="text-center space-y-1">
+                  <p className="text-gray-600">Distance</p>
+                  <p className="text-2xl font-bold">{paymentSummary.distance.toFixed(2)} km</p>
+                </div>
+
+                <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-800">
+                  {userType === "passenger" ? (
+                    <p>✓ You need to pay ₹{paymentSummary.totalFare} to the driver</p>
+                  ) : (
+                    <p>✓ You will receive ₹{paymentSummary.totalFare} from the passenger</p>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Rating Card */}
+            <Card className="border-2 border-yellow-300">
+              <CardHeader>
+                <CardTitle className="text-center text-2xl">⭐ Rate Your Ride</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="text-center">
+                  <p className="text-gray-700 mb-4">
+                    How was your experience with{" "}
+                    {userType === "passenger" ? rideData.driverName : rideData.passengerName}?
+                  </p>
+
+                  {/* Star Rating */}
+                  <div className="flex justify-center gap-2 mb-6">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <button
+                        key={star}
+                        onClick={() => setDriverRating(star)}
+                        className="transition-transform hover:scale-110"
+                      >
+                        <Star
+                          className={`h-10 w-10 ${
+                            star <= driverRating ? "fill-yellow-400 text-yellow-400" : "text-gray-300"
+                          }`}
+                        />
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Review Text */}
+                  <textarea
+                    value={driverReview}
+                    onChange={(e) => setDriverReview(e.target.value)}
+                    placeholder="Share your feedback (optional)"
+                    className="w-full p-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-yellow-500"
+                    rows={3}
+                  />
+
+                  {/* Submit Button */}
+                  <Button
+                    onClick={handleSubmitRating}
+                    disabled={submittingRating || driverRating === 0}
+                    className="w-full mt-4 bg-yellow-600 hover:bg-yellow-700 text-lg py-6"
+                  >
+                    {submittingRating ? "Submitting..." : "Submit Rating"}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

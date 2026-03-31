@@ -50,7 +50,7 @@ export function initSocketServer(httpServer: http.Server) {
         rideId,
         driverInfo,
         passengerInfo,
-        redirectUrl: `/track-passenger/${rideId}`
+        redirectUrl: `/active-ride/${rideId}`
       });
 
       console.log(`Booking accepted notification sent to passenger ${passengerId} for ride ${rideId}`);

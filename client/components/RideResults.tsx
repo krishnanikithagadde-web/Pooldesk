@@ -100,7 +100,9 @@ export default function RideResults({
         socket.emit('joinRide', { rideId: selectedRide.ride_id, userType: 'passenger' });
         socket.on('bookingAccepted', (payload: { rideId: string }) => {
           if (payload.rideId === selectedRide.ride_id) {
-            window.location.href = `/track-passenger/${selectedRide.ride_id}`;
+            // Set user type to passenger for the unified page
+            localStorage.setItem('userType', 'passenger');
+            window.location.href = `/active-ride/${selectedRide.ride_id}`;
           }
         });
       });

@@ -85,7 +85,7 @@ export default function PassengerBookingsView({ passengerId }: PassengerBookings
         console.log('🎉 Booking accepted received:', data);
         console.log('🔍 Current location:', window.location.pathname);
 
-        // ✓ STORE OTP AND DRIVER INFO IN LOCALSTORAGE FOR PASSENGER TRACKING PAGE
+        // ✓ STORE OTP AND DRIVER INFO IN LOCALSTORAGE FOR ACTIVE RIDE PAGE
         if (data.otp || data.driverInfo) {
           const bookingData = {
             rideId: data.rideId,
@@ -97,8 +97,11 @@ export default function PassengerBookingsView({ passengerId }: PassengerBookings
           console.log('✓ Booking data stored:', bookingData);
         }
 
-        // ✅ FORCE REDIRECT TO TRACKING PAGE
-        const trackingUrl = `/track-passenger/${data.rideId}`;
+        // Set user type to passenger for the unified page
+        localStorage.setItem('userType', 'passenger');
+
+        // ✅ FORCE REDIRECT TO UNIFIED ACTIVE RIDE PAGE
+        const trackingUrl = `/active-ride/${data.rideId}`;
         if (window.location.pathname !== trackingUrl) {
           console.log('🔄 Redirecting to:', trackingUrl);
           window.location.href = trackingUrl;
@@ -155,11 +158,14 @@ export default function PassengerBookingsView({ passengerId }: PassengerBookings
             };
             localStorage.setItem(`booking_${newlyAcceptedBooking.rideId}`, JSON.stringify(bookingData));
             console.log('✓ Booking data stored via polling:', bookingData);
-            
-            // Redirect to tracking page
-            const trackingUrl = `/track-passenger/${newlyAcceptedBooking.rideId}`;
+
+            // Set user type to passenger for the unified page
+            localStorage.setItem('userType', 'passenger');
+
+            // Redirect to unified active ride page
+            const trackingUrl = `/active-ride/${newlyAcceptedBooking.rideId}`;
             if (window.location.pathname !== trackingUrl) {
-              console.log('🔄 Redirecting to tracking page via polling:', trackingUrl);
+              console.log('🔄 Redirecting to active ride page via polling:', trackingUrl);
               window.location.href = trackingUrl;
               return; // Don't update state if redirecting
             }
@@ -201,11 +207,14 @@ export default function PassengerBookingsView({ passengerId }: PassengerBookings
               };
               localStorage.setItem(`booking_${newlyAcceptedBooking.rideId}`, JSON.stringify(bookingData));
               console.log('✓ Booking data stored via polling (fallback):', bookingData);
-              
-              // Redirect to tracking page
-              const trackingUrl = `/track-passenger/${newlyAcceptedBooking.rideId}`;
+
+              // Set user type to passenger for the unified page
+              localStorage.setItem('userType', 'passenger');
+
+              // Redirect to unified active ride page
+              const trackingUrl = `/active-ride/${newlyAcceptedBooking.rideId}`;
               if (window.location.pathname !== trackingUrl) {
-                console.log('🔄 Redirecting to tracking page via polling (fallback):', trackingUrl);
+                console.log('🔄 Redirecting to active ride page via polling (fallback):', trackingUrl);
                 window.location.href = trackingUrl;
                 return; // Don't update state if redirecting
               }

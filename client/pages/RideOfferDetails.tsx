@@ -150,6 +150,23 @@ export default function RideOfferDetails() {
         sessionStorage.setItem('userId', ride?.driverId || '');
       }
 
+      // Store passenger info in localStorage for ActiveRide page
+      if (data.passengerInfo) {
+        const bookingData = {
+          rideId: notification.rideId,
+          passengerInfo: data.passengerInfo,
+          passengerName: data.booking.passengerName,
+          passengerEmail: data.booking.passengerEmail,
+          passengerPhone: data.booking.passengerPhone,
+          otp: data.otp,
+          timestamp: Date.now(),
+        };
+        localStorage.setItem(`booking_${notification.rideId}`, JSON.stringify(bookingData));
+      }
+
+      // Set user type to driver for the unified page
+      localStorage.setItem('userType', 'driver');
+
       // Refetch ride details
       const rideResponse = await fetch(`/api/rides/${notification.rideId}`);
       if (rideResponse.ok) {
@@ -162,9 +179,9 @@ export default function RideOfferDetails() {
         description: `${notification.passengerName} is now your passenger`,
       });
 
-      // Redirect to driver tracking page
+      // Redirect to unified active ride page
       setTimeout(() => {
-        navigate(`/track-driver/${notification.rideId}`);
+        navigate(`/active-ride/${notification.rideId}`);
       }, 500);
     } catch (error) {
       console.error("Error accepting passenger:", error);

@@ -239,7 +239,7 @@ export const handleAcceptBooking: RequestHandler = async (req, res) => {
           pickupLocation: booking.pickupLocation,
           dropoffLocation: booking.dropoffLocation,
         },
-        redirectUrl: `/track-passenger/${booking.rideId}`
+        redirectUrl: `/active-ride/${booking.rideId}`
       });
 
       console.log(`✅ Socket event emitted with OTP: ${ride?.otp}`);
@@ -258,8 +258,7 @@ export const handleAcceptBooking: RequestHandler = async (req, res) => {
 
     res.status(200).json({
       message: 'Booking accepted',
-      redirectUrl: `/track-driver/${booking.rideId}`, // Driver goes to driver tracking
-      passengerRedirectUrl: `/track-passenger/${booking.rideId}`, // Passenger goes to passenger tracking
+      redirectUrl: `/active-ride/${booking.rideId}`, // Both driver and passenger see the same page
       otp: ride?.otp, // ✓ INCLUDE OTP IN RESPONSE
       bookingData: {
         bookingId: booking._id.toString(),
@@ -666,7 +665,7 @@ export const handleCheckAcceptedBookings: RequestHandler = async (req, res) => {
             dropoffLocation: booking.dropoffLocation,
           },
           acceptedAt: booking.acceptedAt,
-          redirectUrl: `/track-passenger/${booking.rideId}`
+          redirectUrl: `/active-ride/${booking.rideId}`
         });
       }
     }
